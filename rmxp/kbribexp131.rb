@@ -1,6 +1,6 @@
 # * KBribe XP
 #   Scripter : Kyonides Arkanthes
-#   v1.1.0 - 2023-12-26
+#   v1.3.1 - 2026-07-26
 # * Non Plug & Play Script * #
 
 # Now you can bribe your foes during battles!
@@ -21,9 +21,11 @@
 # bribe.hit = Percent
 # bribe.gold_percent = Percent
 # bribe.dmg_percent = Percent
-# bribe.gold_min = Coins
+# bribe.gold = Coins
 # bribe.show_dmg_pop = Boolean
 # bribe.attempts_max = Number
+# bribe.calc_type = :percent
+# bribe.calc_type = :fixed
 
 # - Allow or Disallow Clearing Bribes Counter
 # $game_system.battle_end_clear_bribes = Boolean
@@ -31,17 +33,20 @@
 module KBribe
   SKILL_ID = 81
   # Bribing Hero's Failure Animation
-  ANIMATION_ID = 101
-  START_HIT_RATE = 33
-  START_GOLD_PERCENT = 5
-  FAILURE_DMG_PERCENT = 25
-  GOLD_MIN = 50
-  MAX_ATTEMPTS = 3
-  SHOW_DMG_POP_UP = true
+  ANIMATION_ID     = 101
+  START_HIT_RATE   = 33
+  START_GOLD_PERC  = 5
+  FAILURE_DMG_PERC = 25
+  START_GOLD_MIN   = 50
+  DEF_FAILED_GOLD  = 50
+  # Types: :percent or :fixed
+  START_CALC_TYPE  = :percent
+  MAX_ATTEMPTS     = 3
+  SHOW_DMG_POP_UP  = true
   CURRENCY_SYMBOL_FIRST = false
   BATTLE_END_CLEAR_BRIBES = true
-  SKILL_COST_TEXT = "Est. Cost: "
-  SUCCESS_LABEL = "Bribed"
+  SKILL_COST_TEXT  = "Est. Cost: "
+  SUCCESS_LABEL    = "Bribed"
   # Add as many MonsterID's as needed
   EXCLUDE_BOSSES = []
   @battlers = []
@@ -84,41 +89,55 @@ module KBribe
   end
 
   def exclude?(mob_id)
-    !EXCLUDE_BOSSES.include?(mob_id)
-  end
-end
-
-class Bribe
-  include KBribe
-  def initialize
-    @hit = START_HIT_RATE
-    @dmg_percent = FAILURE_DMG_PERCENT
-    @gold_percent = START_GOLD_PERCENT
-    @gold_min = GOLD_MIN
-    @show_dmg_pop = SHOW_DMG_POP_UP
-    @attempts_max = MAX_ATTEMPTS
-    @attempts = 0
-    @attempts_total = 0
+    EXCLUDE_BOSSES.include?(mob_id)
   end
 
-  def enabled?
-    @attempts < @attempts_max
-  end
+  class Bribe
+    def initialize
+      @hit = START_HIT_RATE
+      @dmg_percent = FAILURE_DMG_PERC
+      @gold_percent = START_GOLD_PERC
+      @gold = START_GOLD_MIN
+      @show_dmg_pop = SHOW_DMG_POP_UP
+      @calc_type = START_CALC_TYPE
+      @attempts_max = MAX_ATTEMPTS
+      @attempts = 0
+      @attempts_total = 0
+      @failed_gold = 0
+    end
 
-  def add_attempt
-    @attempts += 1
-    @attempts_total += 1
-  end
+    def enabled?
+      @attempts < @attempts_max
+    end
 
-  def clear
-    @attempts = 0
-  end
+    def percentage?
+      @calc_type == :percent
+    end
 
-  def check_clear
-    clear if $game_system.battle_end_clear_bribes
+    def fixed_amount?
+      @calc_type == :fixed
+    end
+
+    def add_attempt
+      @attempts += 1
+      @attempts_total += 1
+    end
+
+    def failed!
+      @failed_gold += DEF_FAILED_GOLD
+    end
+
+    def clear
+      @attempts = @failed_gold = 0
+    end
+
+    def check_clear
+      clear if $game_system.battle_end_clear_bribes
+    end
+    attr_accessor :hit, :dmg_percent, :show_dmg_pop, :gold_percent, :gold
+    attr_accessor :failed_gold, :attempts, :attempts_max, :attempts_total
+    attr_accessor :calc_type
   end
-  attr_accessor :hit, :dmg_percent, :show_dmg_pop, :gold_percent
-  attr_accessor :gold_min, :attempts, :attempts_max, :attempts_total
 end
 
 class Game_System
@@ -134,7 +153,7 @@ class Game_Party
   alias :kyon_bribe_gm_pty_init :initialize
   def initialize
     kyon_bribe_gm_pty_init
-    @bribe = Bribe.new
+    @bribe = KBribe::Bribe.new
   end
 
   def calculate_bribe
@@ -143,28 +162,39 @@ class Game_Party
   end
 
   def pay_bribe!
-    return false if @bribe.enabled? and @bribe.gold_min > @gold
+    return false unless @bribe.enabled?
+    amount = @bribe.percentage? ? calculate_bribe : @bribe.gold
+    return false if amount > @gold
     @bribe.add_attempt
-    amount = calculate_bribe
-    lose_gold(amount)
-    true
+    if rand(100) < @bribe.hit
+      lose_gold(amount)
+      return true
+    else
+      @bribe.failed!
+      return false
+    end
   end
   attr_reader :bribe
 end
 
 class Game_Battler
   alias :kyon_bribe_gm_btlr_skill_fx :skill_effect
+  def bribe_failed(user)
+    user.damage = (user.hp / 100 * $game_party.bribe.dmg_percent).round
+    user.hp -= user.damage
+  end
+
   def check_bribe(user)
-    bribe = $game_party.bribe
+    if KBribe.exclude?(@enemy_id)
+      bribe_failed(user)
+      return
+    end
     hit = $game_party.pay_bribe!
-    hit |= rand(100) < bribe.hit
-    hit |= KBribe.exclude?(@enemy_id)
     if hit
       KBribe.add(self, hit)
       @damage = KBribe::SUCCESS_LABEL
     else
-      user.damage = (user.hp / 100 * bribe.dmg_percent).round
-      user.hp -= user.damage
+      bribe_failed(user)
     end
   end
 
